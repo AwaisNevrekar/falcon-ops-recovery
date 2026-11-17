@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from ..models import InventoryRec, MovementRec
 from .base import FeedAdapter
+from .validate import sanitize_notes
 
 
 class ScheduleFeed(FeedAdapter):
@@ -25,8 +26,26 @@ class AtcFeed(FeedAdapter):
 
 
 class TurnaroundFeed(FeedAdapter):
-    """Per-task turnaround progress, ground teams and free-text ops notes (untrusted text!)."""
+    """Per-task turnaround progress, ground teams and free-text ops notes (untrusted text!).
+
+    Stage 2 for free text lives here: notes are scanned for prompt injection before the value is stored
+    in a snapshot, shown on screen or handed to any agent. Blocked text never leaves this adapter.
+    """
     name, source = "turnaround", "ground handler turnaround system (mock)"
+    guard = None                      # optional guard-model callable (llama-guard3 / Prompt Guard)
+
+    def __init__(self, world, store=None, sleep=None):
+        super().__init__(world, store, sleep)
+        self.blocked: dict[str, dict] = {}        # flight -> what was blocked (patterns only, never the text)
+
+    def _clean(self, key, value):
+        if isinstance(value, dict) and value.get("notes"):
+            safe, blocked = sanitize_notes(value["notes"], self.guard)
+            if blocked:
+                self.blocked.setdefault(key, {"flight": key, "first_seen": self.world.now, "count": len(blocked),
+                                              "patterns": sorted({p for b in blocked for p in b["patterns"]})})
+            value = {**value, "notes": safe}
+        return value
 
 
 class StandsFeed(FeedAdapter):

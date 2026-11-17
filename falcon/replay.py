@@ -507,6 +507,9 @@ class OpsDay:
         return [self._group(self.pnrs[i]) for i in ids]
 
     def _rd_baggage(self, key: str):
+        if key == "capacity":
+            return {"runs_free": C.HOT_TRANSFER_RUNS_PER_30MIN - self.resources[("hot_transfer", self.now // 30)],
+                    "bags_per_run": C.HOT_TRANSFER_BAGS_PER_RUN}
         return [{"pnr": p["id"], "bags": p["bags"], "to": p["cur"], "hot": p["hot"], "rush": p["rush"],
                  "ssr": list(p["ssr"])}
                 for p in (self.pnrs[i] for i in self.by_in.get(key, [])) if p["bags"] and p["status"] in ("OK", "REBOOKED")]
@@ -672,15 +675,20 @@ class OpsDay:
         if p["hist"]:
             p["hist"].pop()
 
-    def hot_transfer(self, inb: str, out: str, on: bool = True) -> int:
+    def reroute_bags(self, pid: str, to: str) -> str:
+        old = self.pnrs[pid]["bags_to"]
+        self.pnrs[pid]["bags_to"] = to
+        return old
+
+    def hot_transfer(self, inb: str, out: str, on: bool = True, runs: int = 1) -> int:
         key = ("hot_transfer", self.now // 30)
         if on:
             self._open(out)
-            if self.resources[key] >= C.HOT_TRANSFER_RUNS_PER_30MIN:
+            if self.resources[key] + runs > C.HOT_TRANSFER_RUNS_PER_30MIN:
                 raise WriteRejected("no hot-transfer vehicle free in this half hour")
-            self.resources[key] += 1
+            self.resources[key] += runs
         else:
-            self.resources[key] = max(0, self.resources[key] - 1)
+            self.resources[key] = max(0, self.resources[key] - runs)
         n = 0
         for pid in self.by_in.get(inb, []):
             p = self.pnrs[pid]

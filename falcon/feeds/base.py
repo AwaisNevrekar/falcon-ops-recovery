@@ -96,7 +96,11 @@ class FeedAdapter:
                     rec["feed_status"] = "STALE" if rec_age > limit else "OK"
                     if rec["feed_status"] != "OK":
                         self.issues[rec.get("fid", "?")] = ("STALE", rec_age, now)
-        return self._result(key, value, now, status, age, note, snapshot)
+        return self._result(key, self._clean(key, value), now, status, age, note, snapshot)
+
+    def _clean(self, key: str, value):
+        """Hook for stage-2 sanitising of untrusted content BEFORE it is stored, shown or sent to an agent."""
+        return value
 
     def _result(self, key, value, now, status, age, note, snapshot) -> FeedResult:
         sid = f"{self.name}:{key}@{now}"
