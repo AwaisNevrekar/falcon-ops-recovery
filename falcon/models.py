@@ -1,10 +1,13 @@
 """Typed contracts shared by every agent, solver and stage (Pydantic)."""
 from __future__ import annotations
 
+import hashlib
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+REF_RX = re.compile(r"\b[A-HJ-NP-R]{6}\b")     # shape of a (fictional) booking reference; used by the privacy checks
 Category = Literal["GROUND", "PASSENGER", "CREW", "AIRCRAFT", "SCHEDULE", "SAFETY"]
 FeedStatus = Literal["OK", "STALE", "MISSING", "CONFLICT", "DOWN"]
 
@@ -86,7 +89,12 @@ class Action(BaseModel):
     def signature(self) -> str:
         """Stable identity of 'the same decision' across re-plans (used for approvals)."""
         p = self.params
-        key = p.get("minutes") or p.get("to") or p.get("to_ac") or p.get("crew_in") or p.get("measure") or ""
+        ids = p.get("pnrs") or p.get("rooms_by_pnr")
+        if isinstance(ids, dict):            # block actions (vouchers, hotel, messages): identity = who is covered
+            key = hashlib.sha1(",".join(sorted(ids)).encode()).hexdigest()[:8]
+        else:
+            key = next((p[k] for k in ("minutes", "to", "to_ac", "crew_in", "measure", "out", "pax", "reason")
+                        if p.get(k)), "")
         return f"{self.type}|{self.target}|{key}"
 
 

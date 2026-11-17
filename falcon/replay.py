@@ -67,8 +67,11 @@ class OpsDay:
                             key=lambda f: (self.legs[f]["std"], f))
         self.by_cur: dict[str, set] = defaultdict(set)
         self.by_in: dict[str, list] = defaultdict(list)
+        self.by_orig: dict[str, list] = defaultdict(list)
+        self.misconnected: set[str] = set()
         for i, p in self.pnrs.items():
             self.by_cur[p["cur"]].add(i)
+            self.by_orig[p["out"]].append(i)
             if p["inb"]:
                 self.by_in[p["inb"]].append(i)
         self.to_dest: dict[str, list] = defaultdict(list)
@@ -86,6 +89,7 @@ class OpsDay:
         self.on_stand: dict[str, str] = {}
         self.tows: list[tuple] = []
         self.resources: dict[tuple, int] = defaultdict(int)     # (kind, 30-min window) -> used
+        self.hot_runs: dict[tuple, tuple] = {}
         self.hotel = {"rooms": C.HOTEL_ROOMS, "bookings": {}}
         self.vouchers: dict[str, int] = {}
         self.reserved: dict[str, str] = {}                      # "crew:ID" / "aircraft:REG" -> holder
@@ -223,6 +227,7 @@ class OpsDay:
                 arr = None if x["cancelled"] else (x["ata"] if x["ata"] is not None else x["eta"])
                 if arr is None or arr + C.MCT_PAX_MIN > leg["atd"]:
                     p["status"], p["missed"] = "MISCONNECTED", True
+                    self.misconnected.add(pid)
                     if p["risk_since"] is None:
                         p["risk_since"] = self.now
                     continue
@@ -334,6 +339,13 @@ class OpsDay:
             p = self.pnrs[pid]
             if p["status"] in ("OK", "REBOOKED"):
                 p["status"], p["risk_since"] = "CANCELLED", self.now
+        for f in done[1:]:                 # the cancelled return leg: its passengers never reach the hub;
+            for pid in self.by_in.get(f, []):          # the outstation looks after them (outside this hub model)
+                p = self.pnrs[pid]
+                if p["status"] == "OK" and self.legs[p["cur"]]["atd"] is None:
+                    self.release(p["cur"], p["cabin"], p["size"])
+                    self.by_cur[p["cur"]].discard(pid)
+                    p["status"], p["risk_since"] = "OUTSTATION", None
         return done
 
     def record_signoff(self, reg: str, by: str) -> None:
@@ -424,7 +436,14 @@ class OpsDay:
         return {"fid": key, "inbound": x["prev"], "inblock": inblock, "std": x["std"], "predicted_offblock": x["etd"],
                 "turn_min": turn, "min_turn": x["turn"], "floor_turn": x["floor"], "turn_cut": x["turn_cut"],
                 "measures": list(x["measures"]), "tasks": tasks, "notes": list(self.notes.get(key, [])),
-                "resources": {m: v["pool"] - self.resources[(m, self.now // 30)] for m, v in C.GROUND_MEASURES.items()}}
+                "resources": {m: v["pool"] - self.resources[(m, self.work_window(key))]
+                              for m, v in C.GROUND_MEASURES.items()}}
+
+    def work_window(self, fid: str) -> int:
+        """The half hour in which the turnaround of departure `fid` happens (ground teams are booked for it)."""
+        leg = self.legs[fid]
+        p = self.legs.get(leg["prev"]) if leg["prev"] else None
+        return max(self.now, p["eta"] if p else leg["std"] - 60) // 30
 
     def visits(self) -> list[dict]:
         """Every aircraft ground visit at the hub that is still to come or in progress."""
@@ -475,7 +494,8 @@ class OpsDay:
 
     def _rd_crew(self, key: str):
         if key == "standby":
-            return [{**c, "legs": list(c["legs"])} for c in self.crew.values() if c["standby"] and not c["legs"]]
+            return [{**c, "legs": list(c["legs"]), "reserved_by": self.reserved.get(f"crew:{c['id']}")}
+                    for c in self.crew.values() if c["standby"] and not c["legs"]]
         return [{**self.crew[c], "legs": list(self.crew[c]["legs"]), "times": self.crew_times(c, key)}
                 for c in self.legs[key]["crew"]]
 
@@ -483,11 +503,22 @@ class OpsDay:
         a = self.aircraft[reg]
         free = all(self.legs[f]["ata"] is not None or self.legs[f]["cancelled"] for f in self.rot.get(reg, []))
         return {"reg": reg, "type": a["type"], "spare": a["spare"], "signoff": copy.deepcopy(a["signoff"]),
-                "open_items": list(a["open_items"]), "free_at_hub": free and f"aircraft:{reg}" not in self.reserved}
+                "open_items": list(a["open_items"]), "free_at_hub": free,
+                "reserved_by": self.reserved.get(f"aircraft:{reg}")}
 
     def _rd_maintenance(self, key: str):
         if key == "spares":
             return [v for v in (self._ac_view(r) for r in sorted(self.aircraft)) if v["free_at_hub"]]
+        if key == "unserviceable":         # aircraft without a current release that still have a departure to fly
+            out = []
+            for reg in sorted(self.aircraft):
+                if signoff_valid(self.aircraft[reg], self.now):
+                    continue
+                nxt = next((f for f in self.rot.get(reg, []) if self.legs[f]["kind"] == "DEP"
+                            and self.legs[f]["atd"] is None and not self.legs[f]["cancelled"]), None)
+                if nxt and self.legs[nxt]["std"] - self.now <= 180:
+                    out.append({"reg": reg, "flight": nxt})
+            return out
         return self._ac_view(key)
 
     def _group(self, p: dict) -> dict:
@@ -495,10 +526,38 @@ class OpsDay:
         return {"pnr": p["id"], "size": p["size"], "cabin": p["cabin"], "ssr": list(p["ssr"]), "family": p["family"],
                 "onward": p["onward"], "inb": p["inb"], "out": p["cur"], "orig": p["out"], "bags": p["bags"],
                 "status": p["status"], "lang": p["lang"], "booked": p["booked"], "loyalty": p["loyalty"],
-                "hot": p["hot"], "rush": p["rush"], "bags_to": p["bags_to"], "overnight": p["overnight"]}
+                "hot": p["hot"], "rush": p["rush"], "bags_to": p["bags_to"], "overnight": p["overnight"],
+                "hotel": p["id"] in self.hotel["bookings"], "voucher": p["id"] in self.vouchers}
 
     def _rd_pax(self, key: str):
-        if key.startswith("out:"):
+        if key == "misconnected":          # stranded groups per inbound flight (nobody has rebooked them yet)
+            out: dict[str, int] = defaultdict(int)
+            for pid in self.misconnected:
+                out[self.pnrs[pid]["inb"]] += self.pnrs[pid]["size"]
+            return dict(sorted(out.items()))
+        if key == "at_risk":               # connection monitor: inbounds whose passengers or bags would miss right now
+            out = {}
+            for f, ids in self.by_in.items():
+                x = self.legs[f]
+                if x["cancelled"] or x["eta"] - x["sta"] < 3:
+                    continue
+                pax = bags = 0
+                for pid in ids:
+                    p = self.pnrs[pid]
+                    y = self.legs[p["cur"]]
+                    if p["status"] != "OK" or y["atd"] is not None or y["cancelled"]:
+                        continue
+                    if x["eta"] + C.MCT_PAX_MIN > y["etd"]:
+                        pax += p["size"]
+                    elif p["bags"] and p["hot"] != y["fid"] and not p["rush"] and x["eta"] + C.MCT_BAG_MIN > y["etd"]:
+                        bags += p["bags"]
+                if pax or bags:
+                    out[f] = {"pax": pax, "bags": bags, "delay": x["eta"] - x["sta"], "sta": x["sta"],
+                              "airborne": x["atd"] is not None}
+            return out
+        if key.startswith("orig:"):
+            ids = self.by_orig.get(key[5:], [])
+        elif key.startswith("out:"):
             ids = sorted(self.by_cur.get(key[4:], ()))
         elif key.startswith("pnr:"):
             ids = [key[4:]]
@@ -507,8 +566,9 @@ class OpsDay:
         return [self._group(self.pnrs[i]) for i in ids]
 
     def _rd_baggage(self, key: str):
-        if key == "capacity":
-            return {"runs_free": C.HOT_TRANSFER_RUNS_PER_30MIN - self.resources[("hot_transfer", self.now // 30)],
+        if key.startswith("capacity:"):    # transfer vehicles free in the half hour this inbound arrives
+            win = max(self.now, self.legs[key[9:]]["eta"]) // 30
+            return {"runs_free": C.HOT_TRANSFER_RUNS_PER_30MIN - self.resources[("hot_transfer", win)],
                     "bags_per_run": C.HOT_TRANSFER_BAGS_PER_RUN}
         return [{"pnr": p["id"], "bags": p["bags"], "to": p["cur"], "hot": p["hot"], "rush": p["rush"],
                  "ssr": list(p["ssr"])}
@@ -539,13 +599,16 @@ class OpsDay:
 
     def dispatch(self, fid: str, measure: str, undo: bool = False) -> None:
         leg, m = self.legs[fid], C.GROUND_MEASURES[measure]
-        key = (measure, self.now // 30)
+        booked = leg.setdefault("measure_win", {})
         if undo:
             if measure in leg["measures"]:
                 leg["measures"].remove(measure)
                 leg["turn_cut"] -= m["saves"]
+                key = (measure, booked.pop(measure, self.work_window(fid)))
                 self.resources[key] = max(0, self.resources[key] - 1)
             return
+        key = (measure, self.work_window(fid))
+        booked[measure] = key[1]
         self._open(fid)
         if measure in leg["measures"]:
             raise WriteRejected(f"{measure} already dispatched for {fid}")
@@ -657,6 +720,7 @@ class OpsDay:
         undo = {k: p[k] for k in ("cur", "status", "rebooked_at", "overnight", "missed")} | {"refund": refund}
         self.by_cur[p["cur"]].discard(pid)
         self.by_cur[to].add(pid)
+        self.misconnected.discard(pid)
         if p["inb"] and p["status"] in ("OK", "MISCONNECTED"):
             p["missed"] = True                              # they do not fly the connection they booked
         if p["risk_since"] is None:
@@ -672,8 +736,23 @@ class OpsDay:
         if u["refund"]:
             self.legs[u["cur"]]["free_" + p["cabin"].lower()] -= p["size"]
         p.update({k: u[k] for k in ("cur", "status", "rebooked_at", "overnight", "missed")})
+        if p["status"] == "MISCONNECTED":
+            self.misconnected.add(pid)
         if p["hist"]:
             p["hist"].pop()
+
+    def uncancel(self, fids: list[str]) -> None:
+        for f in fids:
+            self.legs[f]["cancelled"] = False
+        for pid in self.by_cur.get(fids[0], ()) if fids else ():
+            if self.pnrs[pid]["status"] == "CANCELLED":
+                self.pnrs[pid]["status"] = "OK"
+
+    def issue_voucher(self, pid: str, amount: int) -> None:
+        self.vouchers[pid] = amount
+
+    def void_voucher(self, pid: str) -> None:
+        self.vouchers.pop(pid, None)
 
     def reroute_bags(self, pid: str, to: str) -> str:
         old = self.pnrs[pid]["bags_to"]
@@ -681,13 +760,15 @@ class OpsDay:
         return old
 
     def hot_transfer(self, inb: str, out: str, on: bool = True, runs: int = 1) -> int:
-        key = ("hot_transfer", self.now // 30)
         if on:
             self._open(out)
+            key = ("hot_transfer", max(self.now, self.legs[inb]["eta"]) // 30)     # vehicles are booked for the arrival
             if self.resources[key] + runs > C.HOT_TRANSFER_RUNS_PER_30MIN:
-                raise WriteRejected("no hot-transfer vehicle free in this half hour")
+                raise WriteRejected("no hot-transfer vehicle free in that half hour")
             self.resources[key] += runs
+            self.hot_runs[(inb, out)] = key
         else:
+            key = self.hot_runs.pop((inb, out), ("hot_transfer", self.now // 30))
             self.resources[key] = max(0, self.resources[key] - runs)
         n = 0
         for pid in self.by_in.get(inb, []):
@@ -713,7 +794,7 @@ class OpsDay:
             raise WriteRejected("hotel partner has no rooms left")
         self.hotel["rooms"] -= rooms
         self.hotel["bookings"][pid] = rooms
-        return {"confirmation": f"H{abs(hash((self.seed, pid))) % 10 ** 6:06d}", "rooms": rooms}
+        return {"confirmation": "H" + pid[-6:].upper(), "rooms": rooms}
 
     def cancel_hotel(self, pid: str) -> None:
         self.hotel["rooms"] += self.hotel["bookings"].pop(pid, 0)

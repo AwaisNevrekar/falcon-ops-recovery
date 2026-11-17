@@ -48,8 +48,9 @@ STANDBY_CALLOUT_MIN = 45
 MCT_PAX_MIN = 35
 MCT_BAG_MIN = 45
 HOT_TRANSFER_MIN = 25              # tail-to-tail transfer beats the normal bag MCT
-HOT_TRANSFER_RUNS_PER_30MIN = 5
+HOT_TRANSFER_RUNS_PER_30MIN = 12
 HOT_TRANSFER_BAGS_PER_RUN = 40
+HOT_TRANSFER_MIN_BAGS = 4          # fewer bags than this get a priority tag instead of a vehicle (unless PRM/UMNR)
 TIGHT_CONNECTION_MIN = 60
 LONG_DELAY_MIN = 240
 REBOOK_BUFFER_MIN = 10             # extra margin on top of MCT when rebooking
@@ -67,12 +68,12 @@ LATE_INBOUND_MIN = 15              # inbound delay that opens a disruption case
 CASE_REOPEN_MIN = 10               # delay growth that re-opens a handled flight
 HOLD_AUTO_MAX_MIN = 5              # longer holds need the Duty Ops Controller
 HOLD_MAX_MIN = 20
-GROUND_MEASURES = {                # saves = minutes off the turnaround, pool = teams per 30 min
-    "extra_cleaning_team": {"saves": 5, "cost": 350, "pool": 4},
-    "priority_catering": {"saves": 4, "cost": 250, "pool": 3},
-    "priority_fuelling": {"saves": 3, "cost": 200, "pool": 3},
-    "extra_baggage_loaders": {"saves": 4, "cost": 300, "pool": 4},
-}
+GROUND_MEASURES = {                # saves = minutes off the turnaround, pool = extra teams per half hour of work
+    "extra_cleaning_team": {"saves": 5, "cost": 350, "pool": 8},
+    "priority_catering": {"saves": 4, "cost": 250, "pool": 6},
+    "priority_fuelling": {"saves": 3, "cost": 200, "pool": 6},
+    "extra_baggage_loaders": {"saves": 4, "cost": 300, "pool": 8},
+}                                  # pools belong to the half hour in which the turnaround itself happens
 STAND_BUFFER_MIN = 5
 STAND_HORIZON_MIN = 90
 STAND_WAIT_MAX_MIN = 8             # an arriving aircraft waits this long for a blocked stand

@@ -21,7 +21,7 @@ def run(ctx: Ctx):
     if x and case["type"] == "LATE_INBOUND":
         eta = ctx.tb.eta(x)["eta"]
         bags = ctx.tb.get("baggage", x)
-        cap = ctx.tb.get("baggage", "capacity") or {"runs_free": 0, "bags_per_run": C.HOT_TRANSFER_BAGS_PER_RUN}
+        cap = ctx.tb.get("baggage", "capacity:" + x) or {"runs_free": 0, "bags_per_run": C.HOT_TRANSFER_BAGS_PER_RUN}
         by_out = defaultdict(list)
         for b in bags or []:
             if not b["hot"]:
@@ -41,7 +41,8 @@ def run(ctx: Ctx):
         for r in rows:
             runs = ceil(r["bags"] / cap["bags_per_run"])
             inputs = ["movements:" + x, "baggage:" + x]
-            if r["hot_ok"] and runs <= runs_left:
+            worth = r["priority"] or r["bags"] >= C.HOT_TRANSFER_MIN_BAGS
+            if r["hot_ok"] and worth and runs <= runs_left:
                 runs_left -= runs
                 k += 1
                 cands.append(ctx.action(
@@ -53,7 +54,8 @@ def run(ctx: Ctx):
                     undo={"type": "HOT_TRANSFER_BAGS", "params": {"inb": x, "out": r["out"], "undo": True}}))
             elif not r["tagged"]:
                 k += 1
-                why = "no transfer vehicle free" if r["hot_ok"] else "connection too short even for a hot transfer"
+                why = ("connection too short even for a hot transfer" if not r["hot_ok"] else
+                       "too few bags to send a vehicle" if not worth else "no transfer vehicle free")
                 cands.append(ctx.action(
                     "baggage", k, "PRIORITY_TAG_BAGS", x,
                     f"Priority-tag {r['bags']} bag(s) for {r['out']} for the next flight ({why})",

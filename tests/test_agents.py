@@ -73,7 +73,9 @@ def test_baggage_agent_hot_transfers_the_bags_at_risk():
     p = run(ctx, "propagation", "baggage")
     hot = of(p, "HOT_TRANSFER_BAGS")
     assert sum(a.params["bags"] for a in hot) >= 60               # (one onward flight is late itself: its bags are fine)
-    assert sum(a.params["bags"] for a in hot) == p.extras["bags_at_risk"]
+    tags = of(p, "PRIORITY_TAG_BAGS")                              # too few bags to send a vehicle: tagged instead
+    assert all(a.params["bags"] < C.HOT_TRANSFER_MIN_BAGS for a in tags)
+    assert sum(a.params["bags"] for a in hot + tags) == p.extras["bags_at_risk"]
     assert sum(a.params["runs"] for a in hot) <= C.HOT_TRANSFER_RUNS_PER_30MIN
 
 

@@ -125,6 +125,13 @@ def _care(ctx: Ctx):
     cands, warn, k = [], [], 0
     meal = {a["pnr"]: a["size"] for a in assigns if a["overnight"] or a["wait_min"] >= C.MEAL_VOUCHER_AFTER_MIN}
     hotel = {a["pnr"]: ceil(a["size"] / 2) for a in assigns if a["overnight"]}
+    hotel_pax = {a["pnr"]: a["size"] for a in assigns if a["overnight"]}
+    # Groups rebooked overnight earlier in this case that still have no room (e.g. the hotel API was down).
+    key = "orig:" + flight if ctx.case["type"] == "CANCELLATION" else ctx.case.get("inbound") or ""
+    for g in (ctx.tb.get("pax", key) or []) if key else []:
+        if g["status"] == "REBOOKED" and g["overnight"] and not g["hotel"]:
+            hotel.setdefault(g["pnr"], ceil(g["size"] / 2))
+            hotel_pax.setdefault(g["pnr"], g["size"])
     if meal:
         k += 1
         n = sum(meal.values())
@@ -136,7 +143,7 @@ def _care(ctx: Ctx):
             requires=parent, est_cost_delta=n * C.MEAL_VOUCHER_AED, undo={"type": "MEAL_VOUCHER", "params": {"void": True}}))
     if hotel:
         k += 1
-        rooms, pax = sum(hotel.values()), sum(a["size"] for a in assigns if a["overnight"])
+        rooms, pax = sum(hotel.values()), sum(hotel_pax.values())
         h = ctx.tb.read("hotel", "availability")
         if h.status != "OK":
             warn.append("Hotel partner API is not answering: the hotel booking waits for the partner; nothing else waits.")

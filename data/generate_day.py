@@ -260,7 +260,8 @@ def generate(seed: int = C.SEED) -> dict:
         nonlocal pi
         pi += 1
         h = hashlib.sha1(f"{seed}:{pi}".encode()).hexdigest()
-        p = {"id": "p" + h[:10], "ref": h[10:16].upper(), "size": size, "cabin": cabin, "ssr": list(ssr),
+        ref = "".join("ABCDEFGHJKLMNPQR"[int(c, 16)] for c in h[10:16])    # 6 letters: cannot collide with ids or numbers
+        p = {"id": "p" + h[:10], "ref": ref, "size": size, "cabin": cabin, "ssr": list(ssr),
              "family": family, "onward": onward, "inb": inb, "out": out["fid"],
              "bags": size + rng.randrange(0, 2) if bags is None else bags, "booked": -rng.randrange(600, 200000),
              "loyalty": rng.choice((0, 0, 0, 1, 1, 2, 3)), "lang": rng.choice(("en", "en", "ar"))}

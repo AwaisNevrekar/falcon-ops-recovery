@@ -10,7 +10,7 @@ from pydantic import ValidationError
 
 from . import config as C
 from .feeds.validate import reconcile_eta
-from .models import Action, GuardResult, signoff_valid
+from .models import ACTION_TYPES, Action, GuardResult, signoff_valid
 from .solvers import crew_legality
 
 RULES = {
@@ -90,6 +90,8 @@ def check_action(a: Action, plan: list[Action], ctx: GuardCtx, stage: str = "pla
     def add(rule: str, ok, detail: str = "") -> None:
         res.append(GuardResult(action_id=a.action_id, rule=rule, passed=bool(ok), detail=detail))
 
+    add("G0", a.type in ACTION_TYPES and a.category == ACTION_TYPES.get(a.type),     # ---- G0 known type, fixed category
+        f"{a.type} is a known {a.category} action" if a.type in ACTION_TYPES else f"unknown action type {a.type}")
     if a.type not in G8_EXEMPT:                                                     # ---- G8 data quality
         bad = [(r, s) for r in a.inputs for s in [ctx.input_status(r)] if s != "OK"]
         add("G8", not bad, "; ".join(f"{r} is {s}" for r, s in bad) or f"{len(a.inputs)} input(s) fresh and consistent")

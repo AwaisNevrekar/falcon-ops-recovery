@@ -47,7 +47,8 @@ def crew_legality_worker(ctx: Ctx):
     illegal = [s for s in status if not s["legal"]]
     options, not_offered = {}, 0
     if illegal:
-        standby = ctx.tb.get("crew", "standby") or []
+        standby = [m for m in ctx.tb.get("crew", "standby") or []
+                   if m.get("reserved_by") in (None, ctx.case["case_id"])]
         for s in illegal:
             member = next(c for c in crew if c["id"] == s["crew"])
             res = crew_legality.legal_options(s["role"], member["times"], standby, now)
@@ -76,7 +77,9 @@ def maintenance_check(ctx: Ctx):
                         extras={"flight": n, "aircraft": sched["ac"], "aircraft_ok": False, "unknown": True,
                                 "usable_spares": [], "blocked_spares": []})
     same = sorted((s for s in spares if s["type"] == sched["type"] and s["reg"] != sched["ac"]),
-                  key=lambda s: (not s["spare"], s["reg"]))            # designated spares first, then idle aircraft
+                  key=lambda s: (s.get("reserved_by") != ctx.case["case_id"], not s["spare"], s["reg"]))
+    # order: the aircraft this case already holds (pending/approved swap), designated spares, then idle aircraft
+    same = [s for s in same if s.get("reserved_by") in (None, ctx.case["case_id"])]   # another case holds it
     usable = [s["reg"] for s in same if signoff_valid(s, now)]
     blocked = [{"reg": s["reg"], "reason": "no current maintenance sign-off"
                 + (f" ({'; '.join(s['open_items'])})" if s["open_items"] else "")} for s in same if not signoff_valid(s, now)]
