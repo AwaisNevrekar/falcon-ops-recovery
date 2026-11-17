@@ -1,0 +1,11 @@
+.env
+.venv/
+__pycache__/
+*.db
+*.db-*
+outputs/test_run/
+.streamlit/secrets.toml
+*.pyc
+.pytest_cache/
+.claude/
+data/generated/

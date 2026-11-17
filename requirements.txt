@@ -1,0 +1,14 @@
+# Falcon Gulf Ops Recovery — tested on Python 3.14 (needs 3.10+)
+langgraph>=1.2
+langgraph-checkpoint-sqlite>=3.1
+pydantic>=2.9
+ortools>=9.15
+pulp>=3.0
+streamlit>=1.40
+openai>=1.50
+python-dotenv>=1.0
+pandas>=2.2
+plotly>=5.24
+matplotlib>=3.9
+pytest>=8.0
+# optional tracing: pip install langfuse
