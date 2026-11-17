@@ -230,3 +230,80 @@ def test_injected_ops_note_never_reaches_the_agent_or_the_snapshots():
     assert w.story["S14"]["next"] in hub["turnaround"].blocked
     stored = " ".join(r["value"] for r in hub.store.q("SELECT value FROM feed_snapshots")).lower()
     assert "ignore all previous" not in stored and "without maintenance sign-off" not in stored
+
+
+# ------------------------------------------------------------------ the LLM client itself (retry, fallback, pause)
+class _Err(Exception):
+    pass
+
+
+class RateLimitError(_Err):
+    pass
+
+
+class NotFoundError(_Err):
+    pass
+
+
+class _Client:
+    """Fake OpenAI-compatible client: `script` maps a model name to a list of outcomes (exception or JSON text)."""
+
+    def __init__(self, script):
+        self.script, self.seen = script, []
+        self.chat = self
+        self.completions = self
+
+    def create(self, model, **kw):
+        self.seen.append(model)
+        out = self.script[model].pop(0) if self.script[model] else '{"ok": true}'
+        if isinstance(out, Exception):
+            raise out
+        msg = type("M", (), {"content": out})
+        return type("R", (), {"choices": [type("C", (), {"message": msg})]})
+
+
+def make_llm(script, monkeypatch):
+    from falcon import llm as llm_mod
+    monkeypatch.setattr(llm_mod.time, "sleep", lambda s: None)
+    client = _Client(script)
+    obj = llm_mod.LLM(provider="groq", client=client)
+    obj.models, obj.model = list(script), list(script)[0]
+    return obj, client
+
+
+def test_llm_client_retries_a_rate_limit_on_the_same_model(monkeypatch):
+    llm, client = make_llm({"a": [RateLimitError(), '{"x": 1}'], "b": []}, monkeypatch)
+    assert llm.chat_json("s", "u") == {"x": 1} and client.seen == ["a", "a"] and llm.model == "a"
+
+
+def test_llm_client_falls_back_and_keeps_the_model_that_works(monkeypatch):
+    llm, client = make_llm({"a": [NotFoundError(), NotFoundError()], "b": ['{"x": 2}', '{"x": 3}']}, monkeypatch)
+    assert llm.chat_json("s", "u") == {"x": 2} and llm.model == "b"
+    assert llm.chat_json("s", "u") == {"x": 3} and client.seen == ["a", "b", "b"]
+
+
+def test_llm_client_never_sticks_to_a_broken_fallback_and_pauses_after_repeated_failures(monkeypatch):
+    from falcon import llm as llm_mod
+    llm, client = make_llm({"a": [RateLimitError()] * 9, "b": [NotFoundError()] * 9}, monkeypatch)
+    for _ in range(3):
+        assert llm.chat_json("s", "u") is None
+    assert llm.model == "a"                                         # the broken fallback was not adopted
+    assert not llm.enabled and llm.chat_json("s", "u") is None      # paused: callers use their rule fallback
+    now = llm_mod.time.time()
+    monkeypatch.setattr(llm_mod.time, "time", lambda: now + 61)
+    assert llm.enabled                                              # ... and it comes back by itself
+    assert "RateLimitError" in llm.log[0]["error"] and "NotFoundError" in llm.log[0]["error"]
+
+
+def test_llm_client_blocks_a_prompt_that_contains_protected_data(monkeypatch):
+    llm, client = make_llm({"a": []}, monkeypatch)
+    llm.secret_check = lambda text: "ABCDEF" in text
+    assert llm.chat_json("s", "booking ABCDEF") is None and client.seen == []
+    assert "PRIVACY_BLOCK" in llm.log[-1]["error"]
+
+
+def test_only_real_choices_are_sent_to_the_llm():
+    llm = FakeLLM(lambda pl: {"selected": [c["id"] for c in pl["candidates"]], "rationale": "All fine."})
+    _, ctx = setup(876, "CANCELLATION", "FG718", llm)
+    run(ctx, "reaccommodation", "passenger", "baggage")             # 190+ mandatory bag re-routes are not listed
+    assert all(len(p) < 6000 for p in llm.prompts) and len(llm.prompts) == 1

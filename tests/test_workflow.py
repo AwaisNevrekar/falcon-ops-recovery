@@ -170,3 +170,14 @@ def test_maintenance_signoff_is_a_human_action_that_wakes_the_waiting_case():
     assert e.store.q("SELECT 1 FROM approvals WHERE case_id='C-FG466' AND signature LIKE 'SWAP_AIRCRAFT|FG467|FG-W902'")
     e.run_until(925)
     assert e.world.legs["FG467"]["ac"] == "FG-W902"
+
+
+def test_llm_is_spent_on_headline_cases_plus_one_ordinary_case_per_minute():
+    llm = JunkLLM()
+    e = Engine(approvers="simulated", llm=llm)
+    e.run_until(850)
+    flags = {r["case_id"]: (loads(r["data"]).get("llm"), r["opened_at"]) for r in e.store.q("SELECT * FROM cases")}
+    storm = [c for c, (on, t) in flags.items() if t == 845 and c.startswith("C-FG")]
+    assert len(storm) > 20 and sum(flags[c][0] for c in storm) == 1          # the burst did not flood the model
+    assert flags["C-FG214"][0] is True                                       # the scripted headline case got it
+    assert llm.calls < 40

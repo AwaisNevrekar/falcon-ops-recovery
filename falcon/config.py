@@ -113,7 +113,7 @@ MANUAL_AGENTS = 12
 
 # ---------------------------------------------------------------- LLM
 LLM_TIMEOUT_S = 20
-LLM_MAX_CALLS = 80                 # per run; after that every step uses its rule fallback
+LLM_MAX_CALLS = 300                # per run; after that every step uses its rule fallback
 
 
 def hm(minute: int | None) -> str:

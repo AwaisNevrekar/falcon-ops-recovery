@@ -95,6 +95,7 @@ class Engine:
         self.index: dict[tuple, str] = {}                # (type, flight) -> latest case id
         self._count: dict[tuple, int] = defaultdict(int)
         self._stragglers: dict[str, tuple] = {}
+        self._llm_per_tick: dict[int, int] = {}
         self._events_seen: set[str] = set()
         self._alerted: set[str] = set()
         self.stand_seen: set[tuple] = set()
@@ -179,7 +180,7 @@ class Engine:
         case = state["case"]
         facts = {"title": case["title"], "eta_status": (state["inputs"].get("eta") or {}).get("status"),
                  "feeds_not_ok": [f["feed"] for f in state["inputs"]["feeds_not_ok"]]}
-        plan = plan_case(case, self.llm, facts)
+        plan = plan_case(case, self.llm if case.get("llm") else None, facts)
         for i, att in enumerate(plan["attempts"], 1):
             self.audit.log(case["case_id"], 3, "PLAN_CHECK", {"attempt": i, "source": att["source"], "passed": att["ok"],
                                                              "error": att["error"]}, actor="coordinator")
@@ -200,7 +201,7 @@ class Engine:
 
     def _n_worker(self, payload: dict) -> dict:
         name, case = payload["agent"], payload["case"]
-        ctx = Ctx(case=case, tb=Toolbox(self.hub), results=payload["results"], llm=self.llm)
+        ctx = Ctx(case=case, tb=Toolbox(self.hub), results=payload["results"], llm=self.llm if case.get("llm") else None)
         try:
             p = AGENT_FNS[name](ctx)
         except Exception as e:                            # one failing agent never takes the case down
@@ -473,6 +474,13 @@ class Engine:
         if phase:
             case["phase"] = phase
         cid, now = case["case_id"], self.world.now
+        # LLM budget: the scripted headline cases plus one ordinary case per minute get the LLM; the rest use the
+        # rule fallbacks, so a burst of 30 cases in one minute never stalls on (or floods) the model provider.
+        headline = bool(self.world.legs.get(flight, {}).get("story")) or case_type in ("CANCELLATION", "AIRCRAFT_TECH")
+        used = self._llm_per_tick.get(now, 0)
+        case["llm"] = bool(self.llm.enabled and (headline or used < 1))
+        if case["llm"] and not headline:
+            self._llm_per_tick[now] = used + 1
         self.store.add("cases", case_id=cid, type=case_type, flight=flight, title="", status="RUNNING", opened_at=now, data=case)
         self.cases[cid] = {"case_id": cid, "type": case_type, "flight": flight, "status": "RUNNING", "handled": delay,
                            "opened_at": now, "waits": [], "pending": [], "title": "", "phase": case["phase"]}

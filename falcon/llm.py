@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -15,7 +16,7 @@ from . import config as C
 
 PROVIDERS = {
     "groq": {"base_url": "https://api.groq.com/openai/v1", "key_env": "GROQ_API_KEY",
-             "models": ["openai/gpt-oss-120b", "llama-3.3-70b-versatile"]},
+             "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3-70b-versatile"]},
     "gemini": {"base_url": "https://generativelanguage.googleapis.com/v1beta/openai/", "key_env": "GEMINI_API_KEY",
                "models": ["gemini-2.5-flash", "gemini-2.0-flash"]},
     "ollama": {"base_url": "http://localhost:11434/v1", "key_env": None, "models": ["qwen3:8b", "qwen3:4b"]},
@@ -52,6 +53,8 @@ class LLM:
             choice = next((p for p in ("groq", "gemini") if os.environ.get(PROVIDERS[p]["key_env"])), "off")
         self.provider, self.client, self.models = choice, client, []
         self.calls = self.failures = 0
+        self._paused_until = 0.0
+        self._lock = threading.Lock()
         self.log: list[dict] = []
         self.secret_check = None            # callable(text) -> True if the prompt would leak protected data
         if client is not None:
@@ -75,7 +78,7 @@ class LLM:
 
     @property
     def enabled(self) -> bool:
-        return self.client is not None and self.calls < C.LLM_MAX_CALLS and self.failures < 3
+        return self.client is not None and self.calls < C.LLM_MAX_CALLS and time.time() >= self._paused_until
 
     def describe(self) -> dict:
         return {"provider": self.provider, "model": self.model, "enabled": self.enabled, "calls": self.calls,
@@ -87,27 +90,37 @@ class LLM:
         if self.secret_check and self.secret_check(system + user):
             self.log.append({"tag": tag, "ok": False, "error": "PRIVACY_BLOCK: prompt contained protected data"})
             return None
-        self.calls += 1
-        t0, out, err = time.time(), None, ""
-        for attempt in range(2):
-            try:
-                r = self.client.chat.completions.create(
-                    model=self.model, temperature=0, response_format={"type": "json_object"},
-                    messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
-                out = parse_json(r.choices[0].message.content or "")
-                err = "" if out is not None else "reply was not a JSON object"
-                break
-            except Exception as e:                       # network, auth, rate limit, unknown model ...
-                err = type(e).__name__
-                nxt = self.models.index(self.model) + 1 if self.model in self.models else len(self.models)
-                if attempt == 0 and nxt < len(self.models):
-                    self.model = self.models[nxt]        # try the next model once
-                else:
-                    break
-        self.failures = 0 if out is not None else self.failures + 1
-        self.log.append({"tag": tag, "model": self.model, "ok": out is not None, "ms": int((time.time() - t0) * 1000),
-                         "error": err})
-        return out
+        with self._lock:                                 # one call at a time: gentle on provider rate limits
+            self.calls += 1
+            t0, out, errors = time.time(), None, []
+            queue = [self.model] + [m for m in self.models if m != self.model]
+            tried = 0
+            while queue and tried < 4 and out is None:
+                model = queue.pop(0)
+                tried += 1
+                try:
+                    r = self.client.chat.completions.create(
+                        model=model, temperature=0, response_format={"type": "json_object"},
+                        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
+                    out = parse_json(r.choices[0].message.content or "")
+                    if out is None:
+                        errors.append(f"{model}: reply was not a JSON object")
+                        break
+                    self.model = model                   # keep using the model that works
+                except Exception as e:                   # network, auth, rate limit, unknown model ...
+                    errors.append(f"{model}: {type(e).__name__}")
+                    if type(e).__name__ == "RateLimitError" and tried == 1:
+                        time.sleep(2.5)
+                        queue.insert(0, model)           # same model once more after a short pause
+            if out is None:
+                self.failures += 1
+                if self.failures >= 3:                   # circuit breaker for the LLM: rules only for a minute
+                    self._paused_until, self.failures = time.time() + 60, 0
+            else:
+                self.failures = 0
+            self.log.append({"tag": tag, "model": self.model, "ok": out is not None,
+                             "ms": int((time.time() - t0) * 1000), "error": "; ".join(errors)})
+            return out
 
 
 def guard_model():

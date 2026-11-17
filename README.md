@@ -113,8 +113,13 @@ pauses when an approval is waiting.
 | Prompt injection in free text | Scanned in the feed adapter before the text is stored, shown or sent to an agent | `test_feeds` (injection tests), `test_agents::test_injected_ops_note…`, scenario S14 |
 | Complete audit trail | `audit.trace()` links action → case → proposal → data snapshots → rules → approver → undo | `test_workflow::test_audit_trace_links…`, scenario SAFETY |
 
-Current status: **130 unit and integration tests pass**; **14 of 14 scenarios plus the safety sweep pass**
+Current status: **136 unit and integration tests pass**; **14 of 14 scenarios plus the safety sweep pass**
 (`outputs/test_log.md`).
+
+With the LLM switched on, only the scripted headline cases plus one ordinary case per simulated minute call the
+model (so a burst of 30 cases never floods the provider); a rate limit is retried, a failing model falls back to the
+next one, and after repeated failures the system runs on rules for a minute. Expect each event to take 10–40 seconds
+with a free-tier key and about one second without the LLM.
 
 ## How the pieces fit
 

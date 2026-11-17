@@ -103,11 +103,15 @@ def choose(ctx: Ctx, agent: str, role: str, facts: dict, candidates: list[Action
     ids = [c.action_id for c in candidates]
     keep, rationale, used, warnings = set(default_ids) | set(must), default_rationale, False, []
     llm = ctx.llm
-    if llm is not None and llm.enabled and candidates:
+    # Only real choices go to the model: mandatory actions are kept anyway, and a list too long to weigh
+    # one by one (for example 190 bag re-routes) is decided by rule. This also keeps prompts small.
+    optional = [c for c in candidates if c.action_id not in set(must)]
+    if llm is not None and llm.enabled and optional and len(optional) <= 30:
         payload = {"case": {k: ctx.case.get(k) for k in ("case_id", "type", "flight", "phase")}, "facts": facts,
+                   "mandatory_actions_already_kept": len(candidates) - len(optional),
                    "candidates": [{"id": c.action_id, "type": c.type, "target": c.target, "summary": c.why,
-                                   "delay_delta_min": c.est_delay_delta, "cost_delta_aed": round(c.est_cost_delta),
-                                   "mandatory": c.action_id in must} for c in candidates]}
+                                   "delay_delta_min": c.est_delay_delta, "cost_delta_aed": round(c.est_cost_delta)}
+                                  for c in optional]}
         user = json.dumps(payload, ensure_ascii=False, default=str)
         out = llm.chat_json(SYSTEM.format(role=role), user, tag=f"{ctx.case['case_id']}:{agent}")
         if out is None:
