@@ -76,6 +76,8 @@ class FeedAdapter:
             value, updated = self.call(self.world.read, self.name, key)
         except FeedDown as e:
             return self._result(key, None, now, "DOWN", 0, str(e), snapshot)
+        except (KeyError, IndexError):
+            return self._result(key, None, now, "MISSING", 0, f"unknown record {key!r}", snapshot)
         age = max(0, (now - updated) * 60)
         status, note = "OK", ""
         if value is None:
