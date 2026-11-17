@@ -8,4 +8,5 @@ outputs/test_run/
 *.pyc
 .pytest_cache/
 .claude/
+CLAUDE.md
 data/generated/
