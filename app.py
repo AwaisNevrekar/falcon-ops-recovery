@@ -18,6 +18,7 @@ import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 import streamlit as st  # noqa: E402
 
+from falcon import business_case, evaluation  # noqa: E402
 from falcon import config as C  # noqa: E402
 from falcon.approvals import SimulatedApprovers  # noqa: E402
 from falcon.guards import RULES  # noqa: E402
@@ -34,13 +35,14 @@ st.set_page_config(page_title="Falcon Gulf Ops Recovery", page_icon="✈️", la
 # --------------------------------------------------------------------------- engine (one per replay run)
 @st.cache_resource(show_spinner="Generating the replayed operations day ...")
 def get_engine(run_id: int) -> Engine:
-    path = str(Path(os.environ.get("FALCON_DB_DIR", ROOT)) / f"falcon_state_{run_id}.db")
-    for f in (path, path + ".ckpt.db"):
+    folder = Path(os.environ.get("FALCON_DB_DIR", ROOT))
+    for old in folder.glob("falcon_state_*.db*"):       # tidy up earlier runs (a file still open elsewhere is skipped)
         try:
-            os.remove(f)
+            old.unlink()
         except OSError:
             pass
-    return Engine(db_path=path)
+    # a fresh file for every run: a new replay must never see the approvals or audit rows of an older one
+    return Engine(db_path=str(folder / f"falcon_state_{run_id}_{int(time.time())}.db"))
 
 
 @st.cache_resource
@@ -449,10 +451,103 @@ with tabs[4]:
 
 # =========================================================================== evaluation / business case (phase 6)
 with tabs[5]:
-    st.info("The evaluation report (baseline vs system on the same replayed day) appears here after "
-            "`python -m falcon.evaluation` has been run.")
+    res = evaluation.load()
+    e1, e2 = st.columns([5, 2])
+    e1.caption("Manual baseline and the multi-agent system on the SAME replayed day (same seed, same events, same physical "
+               "rules). The system run uses the rule-based fallbacks and simulated approvers, so it is reproducible.")
+    if e2.button("Run the evaluation again (about 20 s)", width="stretch"):
+        with st.spinner("Running the baseline and the system on the replayed day ..."):
+            res = evaluation.evaluate()
+            evaluation.write(res)
+    if not res:
+        st.info("No evaluation yet. Press the button, or run `python -m falcon.evaluation`.")
+    else:
+        b_, s_ = res["baseline"], res["system"]
+        tiles = [("Knock-on delay", "reactionary_delay_min", "min"), ("Hub departures > 15 min late", "flights_delayed_15", ""),
+                 ("Missed connections", "missed_connections_pax", "pax"), ("Misconnected bags", "misconnected_bags", ""),
+                 ("Avg time to re-accommodate", "rebook_time_avg_min", "min"), ("Crew legality violations", "crew_legality_violations", "")]
+        for col, (label, key, unit) in zip(st.columns(len(tiles)), tiles):
+            col.metric(label, f"{s_[key]:g} {unit}".strip(), f"baseline {b_[key]:g}", delta_color="off", delta_arrow="off",
+                       border=True)
+        rows = evaluation.chart_rows(res)
+        figE = go.Figure(go.Bar(
+            x=[r["pct"] for r in rows], y=[r["label"] for r in rows], orientation="h", marker_color=BLUE, width=0.55,
+            text=[f"{r['baseline']:g} → {r['system']:g} {r['unit']}" for r in rows], textposition="outside",
+            customdata=[[r["baseline"], r["system"], r["unit"]] for r in rows],
+            hovertemplate="<b>%{y}</b><br>manual baseline %{customdata[0]} %{customdata[2]}<br>system %{customdata[1]} "
+                          "%{customdata[2]}<br>%{x}% of baseline<extra></extra>"))
+        figE.add_vline(x=100, line_width=1, line_color=INK)
+        figE.add_annotation(x=100, y=1.04, yref="paper", text="manual baseline = 100", showarrow=False, font=dict(color=INK, size=12))
+        figE.update_layout(height=430, margin=dict(l=10, r=30, t=40, b=10), paper_bgcolor="rgba(0,0,0,0)",
+                           plot_bgcolor="rgba(0,0,0,0)", font=dict(color=INK), showlegend=False,
+                           title=dict(text="System result as % of the manual baseline (lower is better)", font=dict(size=15)),
+                           xaxis=dict(range=[0, 135], gridcolor=GRID, ticksuffix="%"),
+                           yaxis=dict(autorange="reversed", automargin=True))
+        st.plotly_chart(figE, width="stretch", theme=None, config={"displayModeBar": False})
+        st.markdown("**All metrics**")
+        table(evaluation.table_rows(res))
+        stx = s_["stats"]
+        st.markdown(
+            f"**How the system got there:** {stx['cases']} cases · {stx['actions_executed']} actions "
+            f"({stx['actions_auto']} automatic, {stx['actions_approved']} under a human approval) · "
+            f"{stx['approvals_requested']} approval requests, average wait {stx['approval_wait_avg_min']} min, "
+            f"{stx['approvals_timed_out']} timed out (safe default) · {stx['by_type'].get('HOLD_DEPARTURE', 0)} holds protected "
+            f"{stx['pax_protected_by_holds']} passengers · {stx['bags_hot_transferred']} bags hot-transferred · "
+            f"{stx['actions_held_bad_data']} actions held for unreliable data · {stx['escalations']} escalations.")
+        st.caption("Full method, caveats and limits: docs/EVALUATION.md · scenario evidence: outputs/test_log.md")
+
 with tabs[6]:
-    st.info("The editable business-case model appears here once the evaluation has been run.")
+    res = evaluation.load()
+    if not res:
+        st.info("Run the evaluation first (Evaluation tab): the business case prices its results.")
+    else:
+        st.caption("Every figure = a quantity from the evaluation × an assumption you can edit here. The defaults are demo "
+                   "values for a fictional airline, not real costs.")
+        a_in = {}
+        for group, col in zip(["Airline", "Ground handler", "Scale", "Investment"], st.columns(4)):
+            with col:
+                st.markdown(f"**{group}**")
+                for k_, (g_, label, default, unit, note) in business_case.ASSUMPTIONS.items():
+                    if g_ == group:
+                        a_in[k_] = st.number_input(f"{label} ({unit})", value=float(default), min_value=0.0, key="bc_" + k_,
+                                                   help=note or None, step=0.01 if default < 5 else 5.0 if default < 5000 else 50000.0)
+        bc = business_case.compute(a_in, res)
+        why = business_case.explain(a_in, bc)
+        sh = bc["staff_hours_per_day"]
+        pay = bc["payback_months"]
+        m = st.columns(3) + st.columns(3)
+        m[0].metric("Saved per disrupted day", f"AED {bc['per_day']['total']:,.0f}", border=True)
+        m[1].metric("Airline", f"AED {bc['per_day']['airline']:,.0f}", border=True)
+        m[2].metric("Ground handler", f"AED {bc['per_day']['handler']:,.0f}", border=True)
+        m[3].metric("Staff hours saved per day", f"{sh['saved']:.0f} h", border=True)
+        m[4].metric("Net benefit per year", f"AED {bc['per_year']['net']:,.0f}", border=True)
+        m[5].metric("Payback", "never" if pay == float("inf") else f"{pay:.1f} months", border=True)
+        lines_ = ([("Airline", k_, v) for k_, v in bc["airline"].items()]
+                  + [("Ground handler", k_, v) for k_, v in bc["handler"].items()])
+        lines_.sort(key=lambda r: -r[2])
+        figB = go.Figure()
+        for party, color in (("Airline", BLUE), ("Ground handler", ORANGE)):
+            sel = [r for r in lines_ if r[0] == party]
+            figB.add_trace(go.Bar(x=[r[2] for r in sel], y=[r[1] for r in sel], orientation="h", name=party,
+                                  marker_color=color, width=0.55, text=[f"AED {r[2]:,.0f}" for r in sel],
+                                  textposition="outside", customdata=[why[r[1]] for r in sel],
+                                  hovertemplate="<b>%{y}</b><br>AED %{x:,.0f}<br>%{customdata}<extra>" + party + "</extra>"))
+        figB.update_layout(height=420, margin=dict(l=10, r=60, t=40, b=10), paper_bgcolor="rgba(0,0,0,0)",
+                           plot_bgcolor="rgba(0,0,0,0)", font=dict(color=INK), legend=dict(orientation="h", y=-0.12),
+                           title=dict(text="Where the saving of one disrupted day comes from (AED)", font=dict(size=15)),
+                           xaxis=dict(gridcolor=GRID, zerolinecolor=INK, tickformat=",.0f",
+                                      range=[min(0, min(r[2] for r in lines_)) * 1.6, max(1, max(r[2] for r in lines_)) * 1.3]),
+                           yaxis=dict(categoryorder="array", categoryarray=[r[1] for r in reversed(lines_)], automargin=True))
+        st.plotly_chart(figB, width="stretch", theme=None, config={"displayModeBar": False})
+        table([{"who": p_, "line": k_, "how it is calculated": why[k_], "AED per disrupted day": round(v)} for p_, k_, v in lines_])
+        st.markdown(
+            f"**Per year:** {bc['per_year']['equivalent_disrupted_days']:.0f} disrupted-day equivalents → airline "
+            f"AED {bc['per_year']['airline']:,.0f} + ground handler AED {bc['per_year']['handler']:,.0f} = gross "
+            f"AED {bc['per_year']['gross']:,.0f}; minus running cost = **net AED {bc['per_year']['net']:,.0f}**; "
+            f"three-year ROI {bc['roi_3y_pct']:.0f}% on the implementation cost.")
+        st.caption("Staff hours per disrupted day — rebooking agents "
+                   f"{sh['agents_baseline']:.0f} h → {sh['agents_system']:.1f} h; controllers "
+                   f"{sh['controllers_baseline']:.1f} h → {sh['controllers_system']:.1f} h. Method: docs/BUSINESS_CASE.md")
 
 # --------------------------------------------------------------------------- auto-play
 if ss.get("autoplay"):
