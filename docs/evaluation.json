@@ -3,7 +3,7 @@
   "seed": 20261117,
   "day": "replayed operations day, 420 hub departures, 14 scripted disruptions",
   "window": "13:45 to end of day",
-  "baseline_seconds": 5.2,
+  "baseline_seconds": 3.3,
   "system_seconds": 10.9,
   "approver_response_min": {
    "Duty Ops Controller": 4,

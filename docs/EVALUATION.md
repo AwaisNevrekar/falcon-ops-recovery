@@ -58,4 +58,4 @@ The **same replayed operations day** (seed `20261117`: 420 hub departures, about
 .\.venv\Scripts\python.exe scenarios.py
 ```
 
-Run time: baseline 5.2 s, system 10.9 s.
+Run time: baseline 3.3 s, system 10.9 s.
